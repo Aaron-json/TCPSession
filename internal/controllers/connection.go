@@ -2,43 +2,49 @@ package controllers
 
 import (
 	"io"
-	"log"
 	"net"
-	"time"
 )
 
 const (
 	NEW_SESSION  byte = 0
 	JOIN_SESSION byte = 1
 )
+
+// response codes
 const (
-	CONN_CLOSE_DELAY time.Duration = time.Millisecond * 500
+	SUCCESS           byte = 0
+	ERROR             byte = 1
+	SESSION_NOT_FOUND byte = 2
+	SESSION_FULL      byte = 3
+	SERVER_FULL       byte = 4
+	INVALID_ACTION    byte = 5
 )
 
 // wait for the first data on the connection
 func HandleNewConnection(conn *net.TCPConn) {
-	data, err := io.ReadAll(conn)
-	if err != nil || len(data) > 1 {
+	buf := make([]byte, SESSION_CODE_LENGTH+1)
+	n, _ := io.ReadFull(conn, buf[0:1])
+	if n == 0 {
+		// read was unsuccessful
+		buf[0] = ERROR
+		conn.Write(buf)
+		conn.Close()
 		return
 	}
-	action := data[0]
-	if action == NEW_SESSION && len(data) == 1 {
+	if action := buf[0]; action == NEW_SESSION {
 		CreateNewSession(conn)
-	} else if action == JOIN_SESSION && len(data) == SESSION_CODE_LENGTH+1 {
-		JoinSession(conn, string(data[1:]))
-	} else {
-		conn.Write([]byte{INVALID_ACTION})
-		time.Sleep(CONN_CLOSE_DELAY)
-		conn.Close()
-	}
-}
-func LogDataSize(conn *net.TCPConn) error {
-	buf := make([]byte, 1024*1024*10) // around 10MB
-	for {
-		n, err := conn.Read(buf)
-		if err != nil {
-			return err
+	} else if action == JOIN_SESSION {
+		n, _ := io.ReadFull(conn, buf[1:])
+		if n == 0 || n < SESSION_CODE_LENGTH {
+			buf[0] = ERROR
+			conn.Write(buf)
+			conn.Close()
+			return
 		}
-		log.Println("Read size:", n, "Buffer size:", len(buf))
+		JoinSession(conn, string(buf[1:]))
+	} else {
+		buf[0] = INVALID_ACTION
+		conn.Write(buf)
+		conn.Close()
 	}
 }

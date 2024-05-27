@@ -2,40 +2,48 @@ package client
 
 import (
 	"errors"
-	"io"
 	"net"
 	"sync"
 )
 
-type MessageHandler func(*Client, []byte)
+type MessageHandler func(*Client, []byte, int)
 type CloseHandler func(*Client)
 
+// Client is a simple wrapper around a TCP connection that supports concurrent
+// writes to a TCP connection.Reads have to be synchtonised by the caller.
 type Client struct {
-	mu            sync.RWMutex
-	open          bool
-	conn          *net.TCPConn
-	sendCh        chan []byte
-	HandleClose   CloseHandler
-	HandleMessage MessageHandler
+	// protect change of state. (open or closed)
+	mu     sync.RWMutex
+	open   bool
+	conn   *net.TCPConn
+	sendCh chan []byte
 }
 
-const sendBufSize = 15
+const (
+	// write buffers also use this size since the buffer that is read from one client is written to other clients
+	READ_BUF_SIZE = 64 * 1024
+	CHAN_BUF_SIZE = 10 // TODO: test without buffering to see if buffering helps
+)
 
-func NewClient(conn *net.TCPConn) (*Client, error) {
+// Creates a new client unopened client. To start writing messages to this client call the start method.
+func NewClient(conn *net.TCPConn) *Client {
+	var sendChan chan []byte
+	if CHAN_BUF_SIZE <= 0 {
+		sendChan = make(chan []byte)
+	} else {
+		sendChan = make(chan []byte, CHAN_BUF_SIZE)
+	}
 	c := &Client{
 		conn:   conn,
-		sendCh: make(chan []byte, sendBufSize),
+		sendCh: sendChan,
 		open:   false,
-		mu:     sync.RWMutex{},
+		// protects writing to a closed channel when user leaves
+		mu: sync.RWMutex{},
 	}
-	return c, nil
+	return c
 }
 
-// Attempts to close the connection as soon as possible.
-// Called automatically when the session is closed or when a close message is
-// sent to this client. Can also be invoked manually. End must NOT be called
-// more than once.
-func (c *Client) End() {
+func (c *Client) Close() {
 	// close connection and channel to make sure the listen and write
 	// goroutines stop blocking.
 	if !c.open {
@@ -48,57 +56,46 @@ func (c *Client) End() {
 	c.conn.Close()
 	close(c.sendCh)
 
-	if c.HandleClose != nil {
-		c.HandleClose(c)
-	}
 }
 
-func (c *Client) listener() {
-	defer c.End()
-	for {
-
-		data, err := io.ReadAll(c.conn)
-		if err != nil {
-			return
-		}
-		if c.HandleMessage != nil {
-			c.HandleMessage(c, data)
-		}
+// Implements the Read method. After the first EOF error returned from a read call,
+// the caller should close the client. The caller is responsible for synchronising
+// calls to Read. It is recommended to setup a goroutine that continuously reads the connection.
+func (c *Client) Read(buf []byte) (int, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.open {
+		return c.conn.Read(buf)
+	} else {
+		return 0, errors.New("client is not open")
 	}
 }
-
 func (c *Client) writer() {
-	for msg := range c.sendCh {
-		c.conn.Write(msg)
-
+	for buf := range c.sendCh {
+		c.conn.Write(buf)
 	}
 }
 
-// Begins receiving from and writing to the connection. Takes an optional first message parameter.
-// The message is sent before the client starts listening and accepting writing to the connection.
-func (c *Client) Start(msg []byte) {
+// Begins accepting reads and writes to the client. Concurrent writes are supported but concurrent reads are not.
+func (c *Client) Start() {
 	if c.open {
 		// already opened
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	go c.listener()
 	go c.writer()
-	if msg != nil {
-		c.sendCh <- msg
-	}
+
 	c.open = true
 }
 
-// This method either sends the whole message, or nothing. ie on successful write, n == len(p).
-// Messeges sent before Start() or after End() methods will return an error and len == 0 and will be ignored.
-func (c *Client) Send(data []byte) error {
+func (c *Client) Write(buf []byte) (int, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.open {
-		c.sendCh <- data
-		return nil
+		c.sendCh <- buf
+		return len(buf), nil
+	} else {
+		return 0, errors.New("client is not opened")
 	}
-	return errors.New("client has been closed")
 }

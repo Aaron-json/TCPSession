@@ -21,6 +21,7 @@ func (e PoolError) String() string {
 	}
 }
 
+// implements error interface
 func (e PoolError) Error() string {
 	return e.String()
 }
