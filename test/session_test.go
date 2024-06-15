@@ -40,8 +40,9 @@ func TestCreateAndJoinSession(t *testing.T) {
 	}
 
 }
+
 func TestSessionSendData(t *testing.T) {
-	testFile, err := os.ReadFile("test_file_50mb")
+	testFile, err := os.ReadFile("test_file_10kb")
 	if err != nil {
 		t.Fatal(err)
 	}

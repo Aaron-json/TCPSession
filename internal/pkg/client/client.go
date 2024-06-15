@@ -1,9 +1,11 @@
 package client
 
 import (
-	"errors"
+	"log"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type MessageHandler func(*Client, []byte, int)
@@ -17,12 +19,17 @@ type Client struct {
 	open   bool
 	conn   *net.TCPConn
 	sendCh chan []byte
+	// keeps an estimation of how fast/slow the client is offloading data
+	unread atomic.Int32
+	// Called when client is closed. This function is called on a separate goroutine from the
+	// client;s close method
+	OnClose CloseHandler
 }
 
 const (
 	// write buffers also use this size since the buffer that is read from one client is written to other clients
-	READ_BUF_SIZE = 64 * 1024
-	CHAN_BUF_SIZE = 10 // TODO: test without buffering to see if buffering helps
+	CHAN_BUF_SIZE = 1 << 9 // TODO: test without buffering to see if buffering helps
+	MAX_UNREAD    = 5 * 1024 * 1024
 )
 
 // Creates a new client unopened client. To start writing messages to this client call the start method.
@@ -43,19 +50,22 @@ func NewClient(conn *net.TCPConn) *Client {
 	return c
 }
 
+// Closes the client. If an OnCLose handler is set it will be called on its own goroutine.
 func (c *Client) Close() {
-	// close connection and channel to make sure the listen and write
-	// goroutines stop blocking.
+	c.mu.Lock()
 	if !c.open {
+		c.mu.Unlock()
 		return
 	}
-	c.mu.Lock()
 	c.open = false
 	c.mu.Unlock()
 
 	c.conn.Close()
 	close(c.sendCh)
 
+	if handler := c.OnClose; handler != nil {
+		go handler(c)
+	}
 }
 
 // Implements the Read method. After the first EOF error returned from a read call,
@@ -67,23 +77,51 @@ func (c *Client) Read(buf []byte) (int, error) {
 	if c.open {
 		return c.conn.Read(buf)
 	} else {
-		return 0, errors.New("client is not open")
+		return 0, CLOSED_CLIENT
 	}
 }
+
 func (c *Client) writer() {
+	timer := time.NewTimer(time.Millisecond * 200)
+	first := true
+	done := make(chan struct{}, 1)
 	for buf := range c.sendCh {
-		c.conn.Write(buf)
+		if !first {
+			timer.Reset(time.Millisecond * 200)
+		}
+		// time writes to the connection
+		go func(c *Client, b []byte) {
+			c.conn.Write(buf)
+			c.unread.Add(int32(-len(buf)))
+			done <- struct{}{}
+
+		}(c, buf)
+
+		select {
+		case <-done:
+			if !timer.Stop() {
+				// drain the channel
+				<-timer.C
+			}
+			log.Println("Finished write to client")
+		case <-timer.C:
+			log.Println("Write timed out")
+			c.Close()
+		}
+		if first {
+			first = false
+		}
 	}
 }
 
 // Begins accepting reads and writes to the client. Concurrent writes are supported but concurrent reads are not.
 func (c *Client) Start() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.open {
 		// already opened
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	go c.writer()
 
 	c.open = true
@@ -93,9 +131,15 @@ func (c *Client) Write(buf []byte) (int, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.open {
+		// estimate unread size
+		if curUnread := c.unread.Load(); curUnread >= MAX_UNREAD {
+			log.Println("Slow client. Max unread size reached", curUnread)
+			return 0, CLIENT_BUFFER_FULL
+		}
 		c.sendCh <- buf
+		c.unread.Add(int32(len(buf)))
 		return len(buf), nil
 	} else {
-		return 0, errors.New("client is not opened")
+		return 0, CLOSED_CLIENT
 	}
 }
