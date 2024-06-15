@@ -14,7 +14,7 @@ type CloseHandler func(*Client)
 // Client is a simple wrapper around a TCP connection that supports concurrent
 // writes to a TCP connection.Reads have to be synchtonised by the caller.
 type Client struct {
-	// protect change of state. (open or closed)
+	// protect change of open state.
 	mu     sync.RWMutex
 	open   bool
 	conn   *net.TCPConn
@@ -70,7 +70,7 @@ func (c *Client) Close() {
 
 // Implements the Read method. After the first EOF error returned from a read call,
 // the caller should close the client. The caller is responsible for synchronising
-// calls to Read. It is recommended to setup a goroutine that continuously reads the connection.
+// calls to Read. It is recommended to setup a single goroutine that continuously reads the client.
 func (c *Client) Read(buf []byte) (int, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -123,7 +123,6 @@ func (c *Client) Start() {
 		return
 	}
 	go c.writer()
-
 	c.open = true
 }
 
@@ -136,6 +135,7 @@ func (c *Client) Write(buf []byte) (int, error) {
 			log.Println("Slow client. Max unread size reached", curUnread)
 			return 0, CLIENT_BUFFER_FULL
 		}
+		log.Println(len(c.sendCh))
 		c.sendCh <- buf
 		c.unread.Add(int32(len(buf)))
 		return len(buf), nil

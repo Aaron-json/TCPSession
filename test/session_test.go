@@ -46,13 +46,16 @@ func TestSessionSendData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conns, err := createNSession(5)
+	nMembers := 5
+	conns, err := createNSession(nMembers)
 	defer closeConns(conns)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// for every session member, send the test file and have the other members verify the contents they receive
+	resCh := make(chan error, nMembers-1)
 	for senderIdx := range len(conns) {
+		t.Logf("TestSessionSendData: Client %v writing", senderIdx)
 		n, err := conns[senderIdx].Write(testFile)
 		if err != nil {
 			t.Fatal("TestSessionSendData: Error wriring to connection")
@@ -60,12 +63,19 @@ func TestSessionSendData(t *testing.T) {
 		if n < len(testFile) {
 			t.Fatal("TestSessionSendData: Incomplete Write")
 		}
+		// read concurrently to avoid slow receivers
 		for receiverIdx, conn := range conns {
 			if receiverIdx != senderIdx {
-				err := ReadNAndCompare(conn, testFile)
-				if err != nil {
-					t.Fatal(err)
-				}
+
+				t.Logf("TestSessionSendData: Client %v reading", receiverIdx)
+				go ReadNAndCompare(conn, testFile, resCh)
+			}
+		}
+		// read the results from each member
+		for range nMembers - 1 {
+			err = <-resCh
+			if err != nil {
+				t.Fatal("TestSessionSendData:", err)
 			}
 		}
 	}
@@ -101,23 +111,24 @@ func createNSession(n int) ([]*net.TCPConn, error) {
 
 // Helper function that reads n bytes from the TCP stream and compares it to the
 // buffer contents
-func ReadNAndCompare(conn *net.TCPConn, compBuf []byte) error {
+func ReadNAndCompare(conn *net.TCPConn, compBuf []byte, resCh chan error) {
 
 	readBuf := make([]byte, len(compBuf))
 
 	_, err := io.ReadFull(conn, readBuf)
 	if err != nil {
-		return err
+		resCh <- err
+		return
 	}
 	if !reflect.DeepEqual(readBuf, compBuf) {
-		return errors.New("ReadNAndCompare: File contents not equal")
+		resCh <- errors.New("ReadNAndCompare: File contents not equal")
+		return
 	}
-	return nil
+	resCh <- nil
 }
 
 func createConn() (*net.TCPConn, error) {
 	addr := net.TCPAddr{
-		IP:   net.IP{127, 0, 0, 1},
 		Port: PORT,
 	}
 	conn, err := net.DialTCP("tcp", nil, &addr)
