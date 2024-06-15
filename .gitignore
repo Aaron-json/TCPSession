@@ -37,4 +37,4 @@ go.work
 *.png
 
 # allow sample test file
-!sample_file.jpg
+test_file*
