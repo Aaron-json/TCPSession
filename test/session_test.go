@@ -15,23 +15,27 @@ const (
 	PORT = 8080
 )
 
+var (
+	TEST_FILES = []string{"test_file_10kb", "test_file_10mb", "test_file_50mb"}
+)
+
 func TestCreatingSession(t *testing.T) {
 	t.Parallel()
 	conn, _, err := createSession()
-	defer conn.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer conn.Close()
 }
 
 func TestCreateAndJoinSession(t *testing.T) {
 	t.Parallel()
 	// create session
 	conn, code, err := createSession()
-	defer conn.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer conn.Close()
 	// join the session
 	conn2, err := joinSession(code)
 	defer conn2.Close()
@@ -41,17 +45,20 @@ func TestCreateAndJoinSession(t *testing.T) {
 
 }
 
-func TestSessionSendData(t *testing.T) {
+// Tests sending and receiving data from a session with delayed reading. This test should not hang.
+// and will always fail since slow readers are disconnected from the session. As long as it does not hang,
+// consider it passed.
+func TestSlowReader(t *testing.T) {
 	testFile, err := os.ReadFile("test_file_10kb")
 	if err != nil {
 		t.Fatal(err)
 	}
 	nMembers := 5
 	conns, err := createNSession(nMembers)
-	defer closeConns(conns)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer closeConns(conns)
 	// for every session member, send the test file and have the other members verify the contents they receive
 	resCh := make(chan error, nMembers-1)
 	for senderIdx := range len(conns) {
@@ -66,7 +73,6 @@ func TestSessionSendData(t *testing.T) {
 		// read concurrently to avoid slow receivers
 		for receiverIdx, conn := range conns {
 			if receiverIdx != senderIdx {
-
 				t.Logf("TestSessionSendData: Client %v reading", receiverIdx)
 				go ReadNAndCompare(conn, testFile, resCh)
 			}
@@ -81,13 +87,64 @@ func TestSessionSendData(t *testing.T) {
 	}
 }
 
+func TestSendReceive(t *testing.T) {
+
+	nMembers := 5
+	conns, err := createNSession(nMembers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConns(conns)
+	for _, filename := range TEST_FILES {
+		sendReceive(conns, filename, t)
+	}
+
+}
+
+// Function that sends a file to n members and verifies that they receive the same file.
+func sendReceive(conns []*net.TCPConn, filename string, t *testing.T) {
+	t.Helper()
+	filedata, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nMembers := len(conns)
+	// for every session member, send the test file and have the other members verify the contents they receive
+	resCh := make(chan error, nMembers-1)
+	for senderIdx := range len(conns) {
+		// slow receivers will get disconnected. set up readers first
+		for receiverIdx, conn := range conns {
+			if receiverIdx != senderIdx {
+				go ReadNAndCompare(conn, filedata, resCh)
+				t.Logf("TestSendReceive: Client %v reading", receiverIdx)
+			}
+		}
+		t.Logf("TestSendReceive: Client %v writing", senderIdx)
+		n, err := conns[senderIdx].Write(filedata)
+		if err != nil {
+			t.Fatal("TestSendReceive: Error wriring to connection")
+		}
+		if n < len(filedata) {
+			t.Fatal("TestSendReceive: Incomplete Write")
+		}
+
+		// read the results from each member
+		for range nMembers - 1 {
+			err = <-resCh
+			if err != nil {
+				t.Fatal("TestSendReceive:", err)
+			}
+		}
+	}
+}
 func closeConns(conns []*net.TCPConn) {
 	for _, val := range conns {
 		val.Close()
 	}
 }
 
-// n must be greater than 0
+// Creates a session of n members. If any of them fails, it will close all connections and return an error.
+// n must be greater than 0.
 func createNSession(n int) ([]*net.TCPConn, error) {
 	if n <= 0 {
 		return nil, errors.New("createNSession: n must be greater than 0")
@@ -118,13 +175,11 @@ func ReadNAndCompare(conn *net.TCPConn, compBuf []byte, resCh chan error) {
 	_, err := io.ReadFull(conn, readBuf)
 	if err != nil {
 		resCh <- err
-		return
-	}
-	if !reflect.DeepEqual(readBuf, compBuf) {
+	} else if !reflect.DeepEqual(readBuf, compBuf) {
 		resCh <- errors.New("ReadNAndCompare: File contents not equal")
-		return
+	} else {
+		resCh <- nil
 	}
-	resCh <- nil
 }
 
 func createConn() (*net.TCPConn, error) {

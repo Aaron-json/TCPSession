@@ -2,14 +2,22 @@ package main
 
 import (
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 
 	"github.com/Aaron-json/TCPSession/internal/controllers"
 )
 
 func main() {
+	// set default logger
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level:     slog.LevelDebug,
+	}))
+	slog.SetDefault(logger)
+
 	port := 8080
 	addr := net.TCPAddr{
 		Port: port,

@@ -22,6 +22,8 @@ Go websocket server for sending messages between clients in a session. Fork of [
 
 5. After this handshake, the client can now send and receive data.
 
+Note: Clients should always set up readers as soon as possible and buffer reads on their side since slow readers will be disconnected causing future reads to fail. This is to avoid high memory use on the server due to slow or idle clients.
+
 ## Codes
 
 ### Request

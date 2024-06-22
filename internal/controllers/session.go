@@ -50,78 +50,73 @@ func CreateNewSession(conn *net.TCPConn) {
 			break
 		}
 	}
-	buf := make([]byte, SESSION_CODE_LENGTH+1)
-	buf[0] = status
 	if status != SUCCESS { // could not create session
-		conn.Write(buf)
+		conn.Write([]byte{status})
 		conn.Close()
 	} else {
-		newMember := NewMember(newSession, conn)
-		newSession.Members = append(newSession.Members, newMember)
-		for i := range len(sessionCode) {
-			buf[i+1] = sessionCode[i]
+		// create and add first member to session
+		newMember, err := NewMember(newSession, conn, 0)
+		if err != nil {
+			conn.Write([]byte{ERROR})
+			conn.Close()
+			SessionPool.Delete(sessionCode)
+		} else {
+			buf := make([]byte, SESSION_CODE_LENGTH+1)
+			newSession.Members = append(newSession.Members, newMember)
+			for i := range len(sessionCode) {
+				buf[i+1] = sessionCode[i]
+			}
+			conn.Write(buf)
+			go newMember.Broadcast()
+
 		}
-		conn.Write(buf)
-		newMember.Client.Start()
-		go newMember.Broadcast()
 	}
 }
 
 func JoinSession(conn *net.TCPConn, sessionID string) {
-	buf := make([]byte, 1)
 
 	ses, err := SessionPool.Get(sessionID)
 	if err != nil {
 		if err == pool.KEY_NOT_FOUND {
-			buf[0] = SESSION_NOT_FOUND
+			conn.Write([]byte{SESSION_NOT_FOUND})
 		} else {
-			buf[0] = ERROR
+			conn.Write([]byte{ERROR})
 		}
-		conn.Write(buf)
 		conn.Close()
 		return
 	}
-	var (
-		newMember Member
-		status    byte
-	)
+	var newMember Member
 	ses.mu.Lock()
+	defer ses.mu.Unlock()
 	if len(ses.Members) == MAX_USERS_PER_SESSION {
-		status = SESSION_FULL
-	} else {
-		newMember = NewMember(ses, conn)
-		ses.Members = append(ses.Members, newMember)
-		status = SUCCESS
-	}
-	ses.mu.Unlock()
-
-	// handle response outside mutex. Reponse includes delay
-	buf[0] = status
-	if status != SUCCESS {
-		conn.Write(buf)
+		conn.Write([]byte{SESSION_FULL})
 		conn.Close()
 	} else {
-		conn.Write(buf)
-		newMember.Client.Start()
-		go newMember.Broadcast()
-	}
+		newMember, err = NewMember(ses, conn, len(ses.Members))
+		if err != nil {
+			conn.Write([]byte{ERROR})
+			conn.Close()
+		} else {
+			ses.Members = append(ses.Members, newMember)
+			conn.Write([]byte{SUCCESS})
+			go newMember.Broadcast()
 
+		}
+	}
 }
 
 func RemoveMemberFromSession(mem Member) error {
 	mem.Session.mu.Lock()
-
 	defer mem.Session.mu.Unlock()
 	prevLen := len(mem.Session.Members)
 	mem.Session.Members = slices.DeleteFunc(mem.Session.Members, func(v Member) bool {
-		return v.Client == mem.Client
+		return v.Conn == mem.Conn
 	})
 	if prevLen == len(mem.Session.Members) {
 		return errors.New("member not found")
 	}
 	if len(mem.Session.Members) == 0 {
 		SessionPool.Delete(mem.Session.Code)
-		return nil
 	}
 	return nil
 }
