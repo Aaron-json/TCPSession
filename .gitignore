@@ -40,3 +40,6 @@ test_file*
 main
 main.exe
 
+# test log files
+
+log*
