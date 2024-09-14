@@ -21,6 +21,7 @@ type Member struct {
 const (
 	READ_BUF_SIZE     = 64 * 1024
 	INTERNAL_BUF_SIZE = 5 * 1024 * 1024
+	WRITE_TIMEOUT     = time.Millisecond * 100
 )
 
 func NewMember(ses *Session, conn *net.TCPConn, ID int) (Member, error) {
@@ -44,6 +45,49 @@ func NewMember(ses *Session, conn *net.TCPConn, ID int) (Member, error) {
 
 // Starts listening for messages on the connection and forwarding them to
 // all other members in the session.
+func (mem Member) _Broadcast() {
+	defer mem.Remove()
+
+	buf := make([]byte, READ_BUF_SIZE)
+	doneCh := make(chan struct{})
+
+	// create a stopped timer to simplify reuse
+	timer := time.NewTimer(WRITE_TIMEOUT)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	for {
+		nr, err := mem.Conn.Read(buf)
+		if err != nil {
+			return
+		}
+		mem.Session.mu.RLock()
+		for _, rec := range mem.Session.Members {
+			if rec.Conn != mem.Conn {
+				timer.Reset(WRITE_TIMEOUT)
+				go func() {
+					_, err := rec.Conn.Write(buf[:nr])
+					if err != nil {
+						slog.Debug("Broadcast: Write error", slog.Any("Error", err), slog.Int("ClientID", rec.ID))
+					}
+
+					doneCh <- struct{}{}
+				}()
+				select {
+				case <-doneCh:
+					if !timer.Stop() {
+						<-timer.C
+					}
+				case <-timer.C:
+					slog.Debug("Broadcast: Write timeout error", slog.Any("Error", err), slog.Int("ClientID", rec.ID))
+					go rec.Remove()
+				}
+			}
+		}
+		mem.Session.mu.RUnlock()
+	}
+}
+
 func (mem Member) Broadcast() {
 	defer mem.Remove()
 
